@@ -1,0 +1,108 @@
+services:
+  waf-engine:
+    image: actek92/septumcore-waf:latest
+    container_name: main-waf
+
+    environment:
+      - BACKEND=http://waf-backend:9001
+      - MODSEC_AUDIT_ENGINE=RelevantOnly
+      - MODSEC_AUDIT_LOG=/var/log/nginx/audit.log
+      - MODSEC_AUDIT_LOG_FORMAT=JSON
+      - MODSEC_AUDIT_LOG_TYPE=Serial
+      - MODSEC_AUDIT_LOG_PARTS=ABIJDEFHZ
+      
+    cap_add:
+      - NET_BIND_SERVICE
+      
+    group_add:
+      - "1000"
+      
+    ports:
+      - "80:80"
+      - "443:443"
+    
+    healthcheck:
+      test: ["CMD-SHELL", "curl -H 'Host: localhost' -sI http://127.0.0.1 > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    volumes:
+      - ./acme-challenge:/var/www/acme
+      - waf_cache:/var/cache/waf_nginx
+      
+      # Родная папка Nginx для логов
+      - ./waf-logs:/var/log/nginx
+
+      # Проброс путей, чтобы Nginx видел абсолютные пути от бэкенда
+      - ./waf-nginx:/app/waf-nginx:ro
+      - ./waf-nginx/conf.d:/etc/nginx/conf.d
+      - ./waf-nginx/certs:/etc/nginx/certs
+      - ./waf-html:/app/waf-html:ro
+      - ./waf-logs/audit.log:/tmp/audit.log
+
+
+    networks:
+      - waf_net
+    restart: always
+    depends_on:
+      - backend
+
+  backend:
+    image: actek92/septumcore-backend:latest
+    container_name: waf-backend
+    
+    entrypoint: ["sh", "-c", "umask 002 && exec ./septumcore"]
+    ports:
+      - "9001:9001"
+    env_file:
+      - .env
+    environment:
+      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@waf-db:5432/${POSTGRES_DB}?sslmode=disable
+      - WAF_AUDIT_LOG=/var/log/nginx/audit.log
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - waf_cache:/var/cache/waf_nginx
+      
+      - ./waf-logs:/app/waf-logs
+      - ./acme-challenge:/app/acme-challenge
+      - ./waf-logs:/var/log/nginx
+      - ./waf-nginx:/app/waf-nginx
+      - ./waf-html:/app/waf-html
+      
+      - /etc/machine-id:/host/machine-id:ro
+      - /sys/class/dmi/id/product_uuid:/host/product_uuid:ro
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - waf_net
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: waf-db
+    hostname: waf-db
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: always
+    networks:
+      - waf_net
+
+volumes:
+  waf_cache:
+  postgres_data:
+
+networks:
+  waf_net:
+    driver: bridge
