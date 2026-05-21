@@ -39,8 +39,20 @@ update_self() {
     # Скачиваем свежий docker-compose.yml
     curl -sSL "$REPO_URL/$COMPOSE_NAME" -o "$COMPOSE_NAME.new"
     if [ -f "$COMPOSE_NAME.new" ]; then
-        mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
-        echo "✅ Файл конфигурации $COMPOSE_NAME обновлен."
+        if [ -f "$COMPOSE_NAME" ]; then
+            echo -n "⚠️ Файл $COMPOSE_NAME уже существует. Перезаписать его? [y/N]: "
+            read -r ans < /dev/tty
+            if [[ "$ans" =~ ^[Yy]$ ]]; then
+                mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
+                echo "✅ Файл конфигурации $COMPOSE_NAME обновлен."
+            else
+                rm -f "$COMPOSE_NAME.new"
+                echo "⏭️ Оставлен текущий файл $COMPOSE_NAME."
+            fi
+        else
+            mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
+            echo "✅ Файл конфигурации $COMPOSE_NAME скачан."
+        fi
     fi
 
     # Скачиваем скрипт
