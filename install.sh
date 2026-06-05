@@ -102,9 +102,13 @@ fi
 # --- 4. ПРАВА ДОСТУПА И СТРУКТУРА (Блок СЗИ) ---
 echo "⚙️ Настройка локальных директорий и прав доступа..."
 
-mkdir -p waf-logs acme-challenge waf-nginx/conf.d waf-nginx/certs waf-cache waf-html
+mkdir -p waf-logs acme-challenge waf-nginx/conf.d waf-nginx/certs waf-cache waf-html waf-rules
 # Обязательно создаем файл лога до старта Докера! Иначе Докер создаст папку вместо файла.
 touch waf-logs/audit.log
+# Создаем пустой default.conf, чтобы избежать ошибки sed в скриптах запуска OWASP WAF
+touch waf-nginx/conf.d/default.conf
+# Создаем пустой файл кастомных правил, чтобы Nginx не падал при старте (если используется bind mount)
+touch waf-rules/septumcore-rules.conf
 
 # Генерируем базовую заглушку Under Attack (если её еще нет)
 if [ ! -f waf-html/challenge.html ]; then
@@ -114,12 +118,12 @@ if [ ! -f waf-html/challenge.html ]; then
 EOF
 fi
 
-# 1. Зона ответственности БЭКЕНДА (Конфиги, сертификаты, ACME, HTML)
-chown -R 1000:101 waf-nginx acme-challenge waf-cache waf-html
+# 1. Зона ответственности БЭКЕНДА (Конфиги, сертификаты, ACME, HTML, Rules)
+chown -R 1000:101 waf-nginx acme-challenge waf-cache waf-html waf-rules
 # 2770 = Владелец и группа могут всё. Чужие - ничего. SGID бит сохраняет группу.
-find waf-nginx acme-challenge waf-cache waf-html -type d -exec chmod 2770 {} +
+find waf-nginx acme-challenge waf-cache waf-html waf-rules -type d -exec chmod 2770 {} +
 # 660 = Владелец и группа могут читать/писать. Чужие - ничего.
-find waf-nginx acme-challenge waf-html -type f -exec chmod 660 {} +
+find waf-nginx acme-challenge waf-html waf-rules -type f -exec chmod 660 {} +
 
 # 2. Зона ответственности NGINX (Логи сайтов)
 chown -R 101:1000 waf-logs
