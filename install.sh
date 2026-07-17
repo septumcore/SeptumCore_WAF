@@ -110,6 +110,20 @@ touch waf-nginx/conf.d/default.conf
 # Создаем пустой файл кастомных правил, чтобы Nginx не падал при старте (если используется bind mount)
 touch waf-rules/septumcore-rules.conf
 
+# Генерируем SSL-сертификат панели до первого запуска Nginx
+if [ ! -f waf-nginx/certs/panel.crt ] || [ ! -f waf-nginx/certs/panel.key ]; then
+    echo "🔐 Генерация SSL-сертификата панели управления..."
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout waf-nginx/certs/panel.key \
+        -out waf-nginx/certs/panel.crt \
+        -subj "/CN=SeptumCore WAF/O=SeptumCore" \
+        -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null \
+        || openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout waf-nginx/certs/panel.key \
+            -out waf-nginx/certs/panel.crt \
+            -subj "/CN=SeptumCore WAF/O=SeptumCore"
+fi
+
 # Генерируем базовую заглушку Under Attack (если её еще нет)
 if [ ! -f waf-html/challenge.html ]; then
     echo "📄 Создаем дефолтную страницу защиты..."
@@ -142,7 +156,8 @@ echo ""
 echo "✅ УСТАНОВКА/ОБНОВЛЕНИЕ ЗАВЕРШЕНО!"
 echo "📂 Все файлы системы находятся в: $INSTALL_DIR"
 IP=$(hostname -I | awk '{print $1}')
-echo "🌐 Панель управления: http://$IP:9001"
+echo "🌐 Панель управления: https://$IP"
+echo "   (самоподписанный сертификат — браузер может запросить подтверждение)"
 echo "🔑 Логин по умолчанию: admin"
 echo "🔄 Сброс пароля: docker exec -it waf-backend /app/septumcore -reset-user admin"
 echo "==================================================="

@@ -22,7 +22,7 @@ services:
       - "443:443"
 
     healthcheck:
-      test: ["CMD-SHELL", "curl -sI http://127.0.0.1 > /dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -skI https://127.0.0.1 > /dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -33,7 +33,7 @@ services:
 
       # Проброс путей, чтобы Nginx видел абсолютные пути от бэкенда
       - ./waf-nginx/conf.d:/etc/nginx/conf.d
-      - ./waf-nginx/certs:/etc/nginx/certs:ro
+      - ./waf-nginx/certs:/etc/nginx/certs
       - ./waf-rules:/opt/custom-rules:ro
       - ./waf-html:/app/waf-html:ro
 
