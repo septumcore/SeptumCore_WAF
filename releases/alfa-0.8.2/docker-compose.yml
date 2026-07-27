@@ -1,0 +1,124 @@
+services:
+  waf-engine:
+    image: actek92/septumcore-waf:alfa-0.8.2
+    container_name: main-waf
+
+    environment:
+      - BACKEND=http://waf-backend:9001
+      - MODSEC_AUDIT_ENGINE=RelevantOnly
+      - MODSEC_AUDIT_LOG=/var/log/nginx/audit.log
+      - MODSEC_AUDIT_LOG_FORMAT=JSON
+      - MODSEC_AUDIT_LOG_TYPE=Serial
+      - MODSEC_AUDIT_LOG_PARTS=ABIJDEFHZ
+
+    cap_add:
+      - NET_BIND_SERVICE
+
+    group_add:
+      - "1000"
+
+    ports:
+      - "80:80"
+      - "443:443"
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -skI https://127.0.0.1 > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    volumes:
+      - ./acme-challenge:/var/www/acme
+
+      # Проброс путей, чтобы Nginx видел абсолютные пути от бэкенда
+      - ./waf-nginx/conf.d:/etc/nginx/conf.d
+      - ./waf-nginx/certs:/etc/nginx/certs
+      - ./waf-rules:/opt/custom-rules:ro
+      - ./waf-html:/app/waf-html:ro
+
+      # Логи Nginx
+      - ./waf-logs:/app/waf-logs
+      - ./waf-logs:/var/log/nginx
+
+      # Кэш Nginx (локальная папка с управляемыми правами)
+      - ./waf-cache:/var/cache/waf_nginx
+
+      # Временная память с правами на запись для пользователя nginx (UID 101)
+      - type: tmpfs
+        target: /var/cache/nginx
+        tmpfs:
+          mode: 01777
+      - type: tmpfs
+        target: /var/run
+        tmpfs:
+          mode: 01777
+
+    networks:
+      - waf_net
+    restart: always
+    depends_on:
+      - backend
+
+  backend:
+    image: actek92/septumcore-backend:alfa-0.8.2
+    container_name: waf-backend
+
+    # ⚠️ Бинарник называется septumcore (см. Dockerfile.backend)
+    entrypoint: ["sh", "-c", "umask 002 && exec /app/septumcore"]
+
+    ports:
+      - "9000:9001"
+    env_file:
+      - .env
+    environment:
+      - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@waf-db:5432/${POSTGRES_DB}?sslmode=disable
+      - WAF_AUDIT_LOG=/app/waf-logs/audit.log
+      # 🌐 DISTRIBUTED WAF: URL мастера для генерации docker run команд агентов
+      - MASTER_URL=${MASTER_URL:-https://your-master-ip:9000}
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      - ./waf-nginx:/app/waf-nginx
+      - ./waf-logs:/app/waf-logs
+      - ./acme-challenge:/app/acme-challenge
+      - ./waf-rules:/app/waf-rules
+      - ./waf-html:/app/waf-html
+
+      # Лицензирование (идентификаторы машины)
+      - /etc/machine-id:/host/machine-id:ro
+      - /sys/class/dmi/id/product_uuid:/host/product_uuid:ro
+
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - waf_net
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: waf-db
+    hostname: waf-db
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: always
+    networks:
+      - waf_net
+
+volumes:
+  postgres_data:
+
+networks:
+  waf_net:
+    driver: bridge

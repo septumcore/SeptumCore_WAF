@@ -1,0 +1,10 @@
+{
+  "latest": "alfa-0.8.2",
+  "releases": [
+    {
+      "version": "alfa-0.8.2",
+      "date": "2026-07-27",
+      "git_hash": "519c3ed0"
+    }
+  ]
+}

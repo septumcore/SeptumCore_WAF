@@ -8,6 +8,79 @@ SCRIPT_NAME="install.sh"
 COMPOSE_NAME="docker-compose.yml"
 INSTALL_DIR="/opt/septumcore-waf"
 DOCKER_MIRRORS_DEFAULT="https://mirror.gcr.io,https://docker.m.daocloud.io"
+# Версия релиза: latest (по умолчанию) или конкретная, напр. alfa-0.7.63
+# Можно задать: VERSION=alfa-0.7.60 sudo bash install.sh
+# Или:         sudo bash install.sh --version alfa-0.7.60
+TARGET_VERSION="${VERSION:-latest}"
+
+usage() {
+    cat <<EOF
+Использование: $0 [--version <ver>|latest] [--list] [--help]
+
+  --version, -v   Установить конкретный релиз (или latest)
+  --list, -l      Показать последние доступные релизы
+  --help, -h      Справка
+
+Примеры:
+  curl -sSL ${REPO_URL}/install.sh | sudo bash
+  curl -sSL ${REPO_URL}/install.sh | sudo VERSION=alfa-0.7.60 bash
+  sudo bash install.sh --version alfa-0.7.60
+  sudo bash install.sh --list
+EOF
+}
+
+list_releases() {
+    local manifest
+    manifest=$(mktemp)
+    if ! curl --fail --location --silent --show-error \
+        --connect-timeout 10 --max-time 30 \
+        "$REPO_URL/releases/versions.json" -o "$manifest"; then
+        rm -f "$manifest"
+        echo "❌ Не удалось загрузить список релизов: $REPO_URL/releases/versions.json"
+        exit 1
+    fi
+    echo "📦 Доступные релизы (последние 5):"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$manifest" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+print(f"  latest → {data.get('latest', '?')}")
+for r in data.get("releases", []):
+    mark = " *" if r.get("version") == data.get("latest") else "  "
+    print(f"{mark}{r.get('version')}  ({r.get('date', '-')})")
+print("\nУстановка: sudo VERSION=<ver> bash install.sh")
+PY
+    else
+        cat "$manifest"
+    fi
+    rm -f "$manifest"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --version|-v)
+            TARGET_VERSION="${2:-}"
+            if [ -z "$TARGET_VERSION" ]; then
+                echo "❌ Укажите версию после --version"
+                exit 1
+            fi
+            shift 2
+            ;;
+        --list|-l)
+            list_releases
+            exit 0
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "❌ Неизвестный аргумент: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
 
 retry() {
     local attempts="$1"
@@ -85,6 +158,7 @@ fi
 
 echo "==================================================="
 echo "🛡️ SeptumCore WAF CE: Подготовка к установке..."
+echo "📌 Целевая версия: ${TARGET_VERSION}"
 echo "==================================================="
 
 # --- 0. ПРОВЕРКА И ПЕРЕХОД В РАБОЧУЮ ДИРЕКТОРИЮ ---
@@ -101,27 +175,45 @@ else
     cd "$INSTALL_DIR"
 fi
 
+compose_source_url() {
+    if [ "$TARGET_VERSION" = "latest" ] || [ -z "$TARGET_VERSION" ]; then
+        echo "$REPO_URL/$COMPOSE_NAME"
+    else
+        echo "$REPO_URL/releases/${TARGET_VERSION}/$COMPOSE_NAME"
+    fi
+}
+
 # --- 1. ФУНКЦИЯ САМООБНОВЛЕНИЯ ---
 update_self() {
     echo "🔄 Проверка наличия новой версии файлов..."
-    
-    # Скачиваем свежий docker-compose.yml
-    curl_fetch "$REPO_URL/$COMPOSE_NAME" "$COMPOSE_NAME.new"
+
+    local compose_url
+    compose_url=$(compose_source_url)
+    echo "⬇️ Compose: $compose_url"
+
+    if ! curl_fetch "$compose_url" "$COMPOSE_NAME.new"; then
+        echo "❌ Не удалось скачать compose для версии '${TARGET_VERSION}'."
+        echo "   Проверьте: sudo bash install.sh --list"
+        exit 1
+    fi
     if [ -f "$COMPOSE_NAME.new" ]; then
         if [ -f "$COMPOSE_NAME" ]; then
-            if [ -t 0 ] && [ -r /dev/tty ]; then
+            if [ "$TARGET_VERSION" != "latest" ]; then
+                mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
+                echo "✅ Установлен docker-compose.yml для ${TARGET_VERSION}."
+            elif [ -t 0 ] && [ -r /dev/tty ]; then
                 echo -n "⚠️ Файл $COMPOSE_NAME уже существует. Перезаписать его? [y/N]: "
                 read -r ans < /dev/tty
+                if [[ "$ans" =~ ^[Yy]$ ]]; then
+                    mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
+                    echo "✅ Файл конфигурации $COMPOSE_NAME обновлен."
+                else
+                    rm -f "$COMPOSE_NAME.new"
+                    echo "⏭️ Оставлен текущий файл $COMPOSE_NAME."
+                fi
             else
-                ans="n"
                 echo "⚠️ Файл $COMPOSE_NAME уже существует. Без интерактивного терминала оставляем текущий."
-            fi
-            if [[ "$ans" =~ ^[Yy]$ ]]; then
-                mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
-                echo "✅ Файл конфигурации $COMPOSE_NAME обновлен."
-            else
                 rm -f "$COMPOSE_NAME.new"
-                echo "⏭️ Оставлен текущий файл $COMPOSE_NAME."
             fi
         else
             mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
@@ -129,24 +221,25 @@ update_self() {
         fi
     fi
 
-    # Скачиваем скрипт
     curl_fetch "$REPO_URL/$SCRIPT_NAME" "$SCRIPT_NAME.new"
     if [ -f "$SCRIPT_NAME.new" ]; then
         if [ -f "$SCRIPT_NAME" ] && ! cmp -s "$SCRIPT_NAME" "$SCRIPT_NAME.new"; then
             mv "$SCRIPT_NAME.new" "$SCRIPT_NAME"
-            chmod 700 "$SCRIPT_NAME" # СЗИ: только root может запускать и менять
+            chmod 700 "$SCRIPT_NAME"
             echo "✅ Скрипт установки обновлен локально."
         else
             mv "$SCRIPT_NAME.new" "$SCRIPT_NAME"
             chmod 700 "$SCRIPT_NAME"
         fi
     fi
+
+    echo "$TARGET_VERSION" > .installed_version
 }
 
 update_self
 
 # --- 2. ПРОВЕРКА DOCKER ---
-if ! command -v docker &> /dev/null; then 
+if ! command -v docker &> /dev/null; then
     echo "📦 Устанавливаем Docker..."
     retry 3 sh -c "curl --fail --location --silent --show-error --connect-timeout 10 --max-time 300 https://get.docker.com | bash"
 fi
@@ -180,14 +273,10 @@ fi
 echo "⚙️ Настройка локальных директорий и прав доступа..."
 
 mkdir -p waf-logs acme-challenge waf-nginx/conf.d waf-nginx/certs waf-cache waf-html waf-rules
-# Обязательно создаем файл лога до старта Докера! Иначе Докер создаст папку вместо файла.
 touch waf-logs/audit.log
-# Создаем пустой default.conf, чтобы избежать ошибки sed в скриптах запуска OWASP WAF
 touch waf-nginx/conf.d/default.conf
-# Создаем пустой файл кастомных правил, чтобы Nginx не падал при старте (если используется bind mount)
 touch waf-rules/septumcore-rules.conf
 
-# Генерируем SSL-сертификат панели до первого запуска Nginx
 if [ ! -f waf-nginx/certs/panel.crt ] || [ ! -f waf-nginx/certs/panel.key ]; then
     echo "🔐 Генерация SSL-сертификата панели управления..."
     openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
@@ -201,7 +290,6 @@ if [ ! -f waf-nginx/certs/panel.crt ] || [ ! -f waf-nginx/certs/panel.key ]; the
             -subj "/CN=SeptumCore WAF/O=SeptumCore"
 fi
 
-# Генерируем базовую заглушку Under Attack (если её еще нет)
 if [ ! -f waf-html/challenge.html ]; then
     echo "📄 Создаем дефолтную страницу защиты..."
     cat << 'EOF' > waf-html/challenge.html
@@ -209,32 +297,29 @@ if [ ! -f waf-html/challenge.html ]; then
 EOF
 fi
 
-# 1. Зона ответственности БЭКЕНДА (Конфиги, сертификаты, ACME, HTML, Rules)
 chown -R 1000:101 waf-nginx acme-challenge waf-cache waf-html waf-rules
-# 2770 = Владелец и группа могут всё. Чужие - ничего. SGID бит сохраняет группу.
 find waf-nginx acme-challenge waf-cache waf-html waf-rules -type d -exec chmod 2770 {} +
-# 660 = Владелец и группа могут читать/писать. Чужие - ничего.
 find waf-nginx acme-challenge waf-html waf-rules -type f -exec chmod 660 {} +
 
-# 2. Зона ответственности NGINX (Логи сайтов)
 chown -R 101:1000 waf-logs
 find waf-logs -type d -exec chmod 2770 {} +
 find waf-logs -type f -exec chmod 660 {} +
 
-# Разрешаем бэкенду управлять Docker
 chmod 666 /var/run/docker.sock
 
 # --- 5. ОБНОВЛЕНИЕ ОБРАЗОВ И ЗАПУСК ---
-echo "🚀 Подтягиваем свежие образы..."
+echo "🚀 Подтягиваем образы (версия: ${TARGET_VERSION})..."
 retry 3 $COMPOSE_CMD pull
 retry 3 $COMPOSE_CMD up -d --remove-orphans
 
 echo ""
 echo "✅ УСТАНОВКА/ОБНОВЛЕНИЕ ЗАВЕРШЕНО!"
 echo "📂 Все файлы системы находятся в: $INSTALL_DIR"
+echo "📌 Установленная версия: ${TARGET_VERSION}"
 IP=$(hostname -I | awk '{print $1}')
 echo "🌐 Панель управления: https://$IP:9000"
 echo "   (самоподписанный сертификат — браузер может запросить подтверждение)"
 echo "🔑 Логин по умолчанию: admin"
 echo "🔄 Сброс пароля: docker exec -it waf-backend /app/septumcore -reset-user admin"
+echo "📜 Список релизов: sudo bash $INSTALL_DIR/install.sh --list"
 echo "==================================================="

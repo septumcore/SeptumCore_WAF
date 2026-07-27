@@ -104,16 +104,30 @@ SeptumCore WAF оснащен встроенной криптографичес�
 
 ## Быстрый запуск
 
-Установка и обновление выполняются одной командой:
+Установка и обновление до актуальной версии:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/septumcore/SeptumCore_WAF/main/install.sh | sudo bash
 ```
 
+Список последних 5 релизов:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/septumcore/SeptumCore_WAF/main/install.sh | sudo bash -s -- --list
+```
+
+Установка конкретной версии:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/septumcore/SeptumCore_WAF/main/install.sh | sudo VERSION=alfa-0.7.60 bash
+# или
+sudo bash /opt/septumcore-waf/install.sh --version alfa-0.7.60
+```
+
 Что делает инсталлятор:
 
 - Подготавливает рабочую директорию `/opt/septumcore-waf`.
-- Обновляет `install.sh` и `docker-compose.yml` из репозитория релиза.
+- Обновляет `install.sh` и `docker-compose.yml` из репозитория релиза (с закреплённым тегом образа для выбранной версии).
 - Устанавливает Docker (если отсутствует).
 - Генерирует `.env` с `SESSION_SECRET` и параметрами базы данных.
 - Подготавливает права и структуру директорий.
@@ -121,7 +135,7 @@ curl -sSL https://raw.githubusercontent.com/septumcore/SeptumCore_WAF/main/insta
 
 ## Доступ к панели
 
-- URL: `http://<IP_СЕРВЕРА>:9001`
+- URL: `https://<IP_СЕРВЕРА>:9000`
 - Логин: `admin`
 
 Если пароль неизвестен или требуется ротация:
