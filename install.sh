@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # --- КОНФИГУРАЦИЯ ---
 # Прямая ссылка на "сырой" файл скрипта в вашем репозитории
@@ -7,6 +7,75 @@ REPO_URL="https://raw.githubusercontent.com/septumcore/SeptumCore_WAF/main"
 SCRIPT_NAME="install.sh"
 COMPOSE_NAME="docker-compose.yml"
 INSTALL_DIR="/opt/septumcore-waf"
+DOCKER_MIRRORS_DEFAULT="https://mirror.gcr.io,https://docker.m.daocloud.io"
+
+retry() {
+    local attempts="$1"
+    shift
+    local n=1
+    until "$@"; do
+        if [ "$n" -ge "$attempts" ]; then
+            return 1
+        fi
+        echo "⚠️ Попытка $n не удалась, повторяем..."
+        n=$((n + 1))
+        sleep 3
+    done
+}
+
+curl_fetch() {
+    local url="$1"
+    local out="$2"
+    retry 3 curl --fail --location --silent --show-error \
+        --connect-timeout 10 --max-time 120 \
+        "$url" -o "$out"
+}
+
+wait_for_docker() {
+    echo "⏳ Ожидаем готовности Docker daemon..."
+    for _ in $(seq 1 30); do
+        if docker info >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    echo "❌ Docker daemon не поднялся вовремя."
+    return 1
+}
+
+configure_docker_mirrors() {
+    local mirrors_csv="${DOCKER_REGISTRY_MIRRORS:-$DOCKER_MIRRORS_DEFAULT}"
+    [ -n "$mirrors_csv" ] || return 0
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "ℹ️ python3 не найден, пропускаем настройку registry mirrors."
+        return 0
+    fi
+
+    mkdir -p /etc/docker
+    MIRRORS_CSV="$mirrors_csv" python3 <<'PY'
+import json, os, pathlib
+path = pathlib.Path("/etc/docker/daemon.json")
+data = {}
+if path.exists():
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        data = {}
+mirrors = [m.strip() for m in os.environ.get("MIRRORS_CSV", "").split(",") if m.strip()]
+if mirrors:
+    data["registry-mirrors"] = mirrors
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl restart docker
+    elif command -v service >/dev/null 2>&1; then
+        service docker restart
+    fi
+    wait_for_docker
+    echo "✅ Docker registry mirrors настроены: $mirrors_csv"
+}
 
 # Проверка на root
 if [ "$EUID" -ne 0 ]; then
@@ -37,11 +106,16 @@ update_self() {
     echo "🔄 Проверка наличия новой версии файлов..."
     
     # Скачиваем свежий docker-compose.yml
-    curl -sSL "$REPO_URL/$COMPOSE_NAME" -o "$COMPOSE_NAME.new"
+    curl_fetch "$REPO_URL/$COMPOSE_NAME" "$COMPOSE_NAME.new"
     if [ -f "$COMPOSE_NAME.new" ]; then
         if [ -f "$COMPOSE_NAME" ]; then
-            echo -n "⚠️ Файл $COMPOSE_NAME уже существует. Перезаписать его? [y/N]: "
-            read -r ans < /dev/tty
+            if [ -t 0 ] && [ -r /dev/tty ]; then
+                echo -n "⚠️ Файл $COMPOSE_NAME уже существует. Перезаписать его? [y/N]: "
+                read -r ans < /dev/tty
+            else
+                ans="n"
+                echo "⚠️ Файл $COMPOSE_NAME уже существует. Без интерактивного терминала оставляем текущий."
+            fi
             if [[ "$ans" =~ ^[Yy]$ ]]; then
                 mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
                 echo "✅ Файл конфигурации $COMPOSE_NAME обновлен."
@@ -56,7 +130,7 @@ update_self() {
     fi
 
     # Скачиваем скрипт
-    curl -sSL "$REPO_URL/$SCRIPT_NAME" -o "$SCRIPT_NAME.new"
+    curl_fetch "$REPO_URL/$SCRIPT_NAME" "$SCRIPT_NAME.new"
     if [ -f "$SCRIPT_NAME.new" ]; then
         if [ -f "$SCRIPT_NAME" ] && ! cmp -s "$SCRIPT_NAME" "$SCRIPT_NAME.new"; then
             mv "$SCRIPT_NAME.new" "$SCRIPT_NAME"
@@ -74,8 +148,11 @@ update_self
 # --- 2. ПРОВЕРКА DOCKER ---
 if ! command -v docker &> /dev/null; then 
     echo "📦 Устанавливаем Docker..."
-    curl -fsSL https://get.docker.com | bash
+    retry 3 sh -c "curl --fail --location --silent --show-error --connect-timeout 10 --max-time 300 https://get.docker.com | bash"
 fi
+
+wait_for_docker
+configure_docker_mirrors
 
 get_docker_compose_cmd() {
     if docker compose version &>/dev/null; then echo "docker compose";
@@ -149,8 +226,8 @@ chmod 666 /var/run/docker.sock
 
 # --- 5. ОБНОВЛЕНИЕ ОБРАЗОВ И ЗАПУСК ---
 echo "🚀 Подтягиваем свежие образы..."
-$COMPOSE_CMD pull
-$COMPOSE_CMD up -d --remove-orphans
+retry 3 $COMPOSE_CMD pull
+retry 3 $COMPOSE_CMD up -d --remove-orphans
 
 echo ""
 echo "✅ УСТАНОВКА/ОБНОВЛЕНИЕ ЗАВЕРШЕНО!"
