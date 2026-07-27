@@ -88,7 +88,7 @@ services:
     environment:
       # ⚠️  ОБЯЗАТЕЛЬНО ЗАПОЛНИТЕ:
       - NODE_TOKEN=${NODE_TOKEN}           # Токен из панели WAF → Ноды → Скопировать токен
-      - MASTER_URL=${MASTER_URL}           # URL мастер-ноды, например: http://192.168.1.10:9001
+      - MASTER_URL=${MASTER_URL}           # URL мастер-ноды, например: https://192.168.1.10:9000
 
       # Агент-режим: при наличии NODE_TOKEN БД не требуется
       # SESSION_SECRET не нужен в агент-режиме

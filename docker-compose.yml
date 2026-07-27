@@ -68,14 +68,14 @@ services:
     entrypoint: ["sh", "-c", "umask 002 && exec /app/septumcore"]
 
     ports:
-      - "9001:9001"
+      - "9000:9001"
     env_file:
       - .env
     environment:
       - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@waf-db:5432/${POSTGRES_DB}?sslmode=disable
       - WAF_AUDIT_LOG=/app/waf-logs/audit.log
       # 🌐 DISTRIBUTED WAF: URL мастера для генерации docker run команд агентов
-      - MASTER_URL=${MASTER_URL:-https://your-master-ip:9001}
+      - MASTER_URL=${MASTER_URL:-https://your-master-ip:9000}
 
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

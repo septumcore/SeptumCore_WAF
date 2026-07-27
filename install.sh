@@ -156,7 +156,7 @@ echo ""
 echo "✅ УСТАНОВКА/ОБНОВЛЕНИЕ ЗАВЕРШЕНО!"
 echo "📂 Все файлы системы находятся в: $INSTALL_DIR"
 IP=$(hostname -I | awk '{print $1}')
-echo "🌐 Панель управления: https://$IP"
+echo "🌐 Панель управления: https://$IP:9000"
 echo "   (самоподписанный сертификат — браузер может запросить подтверждение)"
 echo "🔑 Логин по умолчанию: admin"
 echo "🔄 Сброс пароля: docker exec -it waf-backend /app/septumcore -reset-user admin"
