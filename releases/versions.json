@@ -1,6 +1,11 @@
 {
-  "latest": "alfa-0.8.2",
+  "latest": "alfa-0.8.3",
   "releases": [
+    {
+      "version": "alfa-0.8.3",
+      "date": "2026-07-27",
+      "git_hash": "ae5a3111"
+    },
     {
       "version": "alfa-0.8.2",
       "date": "2026-07-27",

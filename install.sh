@@ -184,6 +184,15 @@ compose_source_url() {
 }
 
 # --- 1. ФУНКЦИЯ САМООБНОВЛЕНИЯ ---
+is_yes() {
+    local v
+    v=$(printf '%s' "${1:-}" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')
+    case "$v" in
+        y|yes|д|да) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 update_self() {
     echo "🔄 Проверка наличия новой версии файлов..."
 
@@ -198,22 +207,28 @@ update_self() {
     fi
     if [ -f "$COMPOSE_NAME.new" ]; then
         if [ -f "$COMPOSE_NAME" ]; then
-            if [ "$TARGET_VERSION" != "latest" ]; then
-                mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
-                echo "✅ Установлен docker-compose.yml для ${TARGET_VERSION}."
+            local do_overwrite="n"
+            # Явная версия / FORCE_COMPOSE=1 / неинтерактивный update → всегда обновляем compose
+            if [ "$TARGET_VERSION" != "latest" ] || [ "${FORCE_COMPOSE:-0}" = "1" ]; then
+                do_overwrite="y"
             elif [ -t 0 ] && [ -r /dev/tty ]; then
                 echo -n "⚠️ Файл $COMPOSE_NAME уже существует. Перезаписать его? [y/N]: "
-                read -r ans < /dev/tty
-                if [[ "$ans" =~ ^[Yy]$ ]]; then
-                    mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
-                    echo "✅ Файл конфигурации $COMPOSE_NAME обновлен."
-                else
-                    rm -f "$COMPOSE_NAME.new"
-                    echo "⏭️ Оставлен текущий файл $COMPOSE_NAME."
+                read -r ans < /dev/tty || true
+                if is_yes "$ans"; then
+                    do_overwrite="y"
                 fi
             else
-                echo "⚠️ Файл $COMPOSE_NAME уже существует. Без интерактивного терминала оставляем текущий."
+                # curl | bash — без TTY: обновляем compose по умолчанию (иначе «обновление» бесполезно)
+                echo "ℹ️ Неинтерактивный режим: обновляем $COMPOSE_NAME автоматически."
+                do_overwrite="y"
+            fi
+
+            if [ "$do_overwrite" = "y" ]; then
+                mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
+                echo "✅ Файл конфигурации $COMPOSE_NAME обновлен."
+            else
                 rm -f "$COMPOSE_NAME.new"
+                echo "⏭️ Оставлен текущий файл $COMPOSE_NAME."
             fi
         else
             mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
@@ -310,12 +325,17 @@ chmod 666 /var/run/docker.sock
 # --- 5. ОБНОВЛЕНИЕ ОБРАЗОВ И ЗАПУСК ---
 echo "🚀 Подтягиваем образы (версия: ${TARGET_VERSION})..."
 retry 3 $COMPOSE_CMD pull
-retry 3 $COMPOSE_CMD up -d --remove-orphans
+echo "🔄 Пересоздаём контейнеры, чтобы подхватить новые образы..."
+retry 3 $COMPOSE_CMD up -d --remove-orphans --force-recreate
 
 echo ""
 echo "✅ УСТАНОВКА/ОБНОВЛЕНИЕ ЗАВЕРШЕНО!"
 echo "📂 Все файлы системы находятся в: $INSTALL_DIR"
 echo "📌 Установленная версия: ${TARGET_VERSION}"
+if command -v docker >/dev/null 2>&1; then
+    echo "🔎 Версия внутри backend-контейнера:"
+    docker exec waf-backend /app/septumcore -v 2>/dev/null || docker exec waf-backend sh -c '/app/septumcore -v' 2>/dev/null || echo "   (не удалось прочитать — контейнер ещё стартует)"
+fi
 IP=$(hostname -I | awk '{print $1}')
 echo "🌐 Панель управления: https://$IP:9000"
 echo "   (самоподписанный сертификат — браузер может запросить подтверждение)"
