@@ -288,13 +288,26 @@ update_self() {
                 replace_compose=1
             else
                 echo "⏭️ docker-compose.yml оставлен без изменений."
-                # Всё равно обновим теги образов в существующем compose, если там :latest
-                if [ "$RESOLVED_VERSION" != "latest" ] && grep -q ':latest' "$COMPOSE_NAME" 2>/dev/null; then
-                    echo "🔧 В текущем compose найдены теги :latest — закрепляем ${RESOLVED_VERSION}..."
-                    cp "$COMPOSE_NAME" "${COMPOSE_NAME}.bak.$(date +%Y%m%d%H%M%S)"
-                    sed -i.bak "s|:latest|:${RESOLVED_VERSION}|g" "$COMPOSE_NAME" 2>/dev/null \
-                      || sed -i '' "s|:latest|:${RESOLVED_VERSION}|g" "$COMPOSE_NAME"
-                    rm -f "${COMPOSE_NAME}.bak"
+                # Всё равно синхронизируем теги образов в существующем compose,
+                # чтобы не получить "релиз alfa-0.8.008, а backend всё ещё 0.8.007".
+                if [ "$RESOLVED_VERSION" != "latest" ] && [ -r "$COMPOSE_NAME" ]; then
+                    if grep -qE 'septumcore-(waf|backend):alfa-' "$COMPOSE_NAME" 2>/dev/null; then
+                        echo "🔧 В текущем compose найдены зафиксированные теги alfa-* — синхронизируем на ${RESOLVED_VERSION}..."
+                        cp "$COMPOSE_NAME" "${COMPOSE_NAME}.bak.$(date +%Y%m%d%H%M%S)"
+                        sed -i.bak -E "s|(septumcore-waf:)(alfa-[^\"[:space:]]+)|\\1${RESOLVED_VERSION}|g" "$COMPOSE_NAME" 2>/dev/null \
+                          || sed -i '' -E "s|(septumcore-waf:)(alfa-[^\"[:space:]]+)|\\1${RESOLVED_VERSION}|g" "$COMPOSE_NAME"
+                        sed -i.bak -E "s|(septumcore-backend:)(alfa-[^\"[:space:]]+)|\\1${RESOLVED_VERSION}|g" "$COMPOSE_NAME" 2>/dev/null \
+                          || sed -i '' -E "s|(septumcore-backend:)(alfa-[^\"[:space:]]+)|\\1${RESOLVED_VERSION}|g" "$COMPOSE_NAME"
+                        rm -f "$COMPOSE_NAME.bak" 2>/dev/null || true
+                    elif grep -q ':latest' "$COMPOSE_NAME" 2>/dev/null; then
+                        echo "🔧 В текущем compose найдены теги :latest — закрепляем ${RESOLVED_VERSION}..."
+                        cp "$COMPOSE_NAME" "${COMPOSE_NAME}.bak.$(date +%Y%m%d%H%M%S)"
+                        sed -i.bak "s|:latest|:${RESOLVED_VERSION}|g" "$COMPOSE_NAME" 2>/dev/null \
+                          || sed -i '' "s|:latest|:${RESOLVED_VERSION}|g" "$COMPOSE_NAME"
+                        rm -f "${COMPOSE_NAME}.bak" 2>/dev/null || true
+                    else
+                        echo "ℹ️ В текущем compose не найдено :latest или alfa-* теги septumcore-waf/backend — пропускаем синхронизацию тегов."
+                    fi
                 fi
                 rm -f "$COMPOSE_NAME.new"
             fi

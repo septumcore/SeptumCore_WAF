@@ -1,6 +1,6 @@
 services:
   waf-engine:
-    image: actek92/septumcore-waf:alfa-0.8.2
+    image: actek92/septumcore-waf:alfa-0.8.010
     container_name: main-waf
 
     environment:
@@ -61,7 +61,7 @@ services:
       - backend
 
   backend:
-    image: actek92/septumcore-backend:alfa-0.8.2
+    image: actek92/septumcore-backend:alfa-0.8.010
     container_name: waf-backend
 
     # ⚠️ Бинарник называется septumcore (см. Dockerfile.backend)
