@@ -2,8 +2,12 @@
 set -euo pipefail
 
 # --- КОНФИГУРАЦИЯ ---
-# Прямая ссылка на "сырой" файл скрипта в вашем репозитории
-REPO_URL="https://raw.githubusercontent.com/septumcore/SeptumCore_WAF/main"
+# Базовый источник релизных файлов.
+# По умолчанию — GitLab CE repo, но можно переопределить через REPO_URL=...
+DEFAULT_REPO_URL="https://raw.githubusercontent.com/septumcore/SeptumCore_WAF/main"
+REPO_URL="${REPO_URL:-$DEFAULT_REPO_URL}"
+VERSION_INFO_URL="${VERSION_INFO_URL:-${REPO_URL}/version.json}"
+RELEASES_MANIFEST_URL="${RELEASES_MANIFEST_URL:-${REPO_URL}/releases/versions.json}"
 SCRIPT_NAME="install.sh"
 COMPOSE_NAME="docker-compose.yml"
 INSTALL_DIR="/opt/septumcore-waf"
@@ -33,8 +37,8 @@ usage() {
   REPLACE_COMPOSE=yes   Без спроса заменить docker-compose.yml
   SEPTUMCORE_VERSION    Тег образов в docker-compose/.env (если не задан — compose использует latest)
 
-Примечание: latest всегда резолвится в конкретный тег из releases/versions.json
-(не в плавающий Docker :latest — он часто отстаёт).
+Примечание: latest всегда резолвится в конкретный тег из version.json
+(если version.json недоступен — используем releases/versions.json; Docker :latest не используется как источник правды).
 Если локальный docker-compose.yml уже есть и отличается от релиза —
 скрипт спросит, заменять ли его (по умолчанию — нет).
 EOF
@@ -60,36 +64,43 @@ set_env_var() {
 }
 
 resolve_latest_version() {
-    local manifest
-    manifest=$(mktemp)
+    local meta
+    meta=$(mktemp)
     if ! curl --fail --location --silent --show-error \
         --connect-timeout 10 --max-time 30 \
-        "$REPO_URL/releases/versions.json" -o "$manifest"; then
-        rm -f "$manifest"
-        return 1
-    fi
-    if command -v python3 >/dev/null 2>&1; then
-        python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("latest",""))' "$manifest"
+        "$VERSION_INFO_URL" -o "$meta"; then
+        rm -f "$meta"
+        meta=$(mktemp)
+        if ! curl --fail --location --silent --show-error \
+            --connect-timeout 10 --max-time 30 \
+            "$RELEASES_MANIFEST_URL" -o "$meta"; then
+            rm -f "$meta"
+            return 1
+        fi
+        if command -v python3 >/dev/null 2>&1; then
+            python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("latest",""))' "$meta"
+        else
+            grep -o '"latest"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta" | head -1 | cut -d'"' -f4
+        fi
     else
-        # грубый fallback без python
-        grep -o '"latest"[[:space:]]*:[[:space:]]*"[^"]*"' "$manifest" | head -1 | cut -d'"' -f4
+        if command -v python3 >/dev/null 2>&1; then
+            python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version",""))' "$meta"
+        else
+            grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta" | head -1 | cut -d'"' -f4
+        fi
     fi
-    rm -f "$manifest"
+    rm -f "$meta"
 }
 
 list_releases() {
     local manifest
     manifest=$(mktemp)
-    if ! curl --fail --location --silent --show-error \
+    if curl --fail --location --silent --show-error \
         --connect-timeout 10 --max-time 30 \
-        "$REPO_URL/releases/versions.json" -o "$manifest"; then
-        rm -f "$manifest"
-        echo "❌ Не удалось загрузить список релизов: $REPO_URL/releases/versions.json"
-        exit 1
-    fi
-    echo "📦 Доступные релизы (последние 5):"
-    if command -v python3 >/dev/null 2>&1; then
-        python3 - "$manifest" <<'PY'
+        "$RELEASES_MANIFEST_URL" -o "$manifest"; then
+        echo "📦 Доступные релизы (последние 5):"
+        if command -v python3 >/dev/null 2>&1; then
+            python3 - "$manifest" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
 print(f"  latest → {data.get('latest', '?')}")
@@ -98,8 +109,30 @@ for r in data.get("releases", []):
     print(f"{mark}{r.get('version')}  ({r.get('date', '-')})")
 print("\nУстановка: sudo VERSION=<ver> bash install.sh")
 PY
+        else
+            cat "$manifest"
+        fi
     else
-        cat "$manifest"
+        rm -f "$manifest"
+        manifest=$(mktemp)
+        if ! curl --fail --location --silent --show-error \
+            --connect-timeout 10 --max-time 30 \
+            "$VERSION_INFO_URL" -o "$manifest"; then
+            rm -f "$manifest"
+            echo "❌ Не удалось загрузить ни $RELEASES_MANIFEST_URL, ни $VERSION_INFO_URL"
+            exit 1
+        fi
+        echo "📦 Доступный текущий релиз:"
+        if command -v python3 >/dev/null 2>&1; then
+            python3 - "$manifest" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+print(f"  latest → {data.get('version', '?')}  ({data.get('build_date', '-')})")
+print("\nИстория релизов недоступна: releases/versions.json не найден.")
+PY
+        else
+            cat "$manifest"
+        fi
     fi
     rm -f "$manifest"
 }
@@ -208,12 +241,12 @@ echo "==================================================="
 echo "🛡️ SeptumCore WAF CE: Подготовка к установке..."
 echo "📌 Запрошено: ${TARGET_VERSION}"
 
-# latest → конкретный тег из манифеста (надёжнее плавающего Docker :latest)
+# latest → конкретный тег из version.json (или fallback в releases/versions.json)
 if [ "$TARGET_VERSION" = "latest" ] || [ -z "$TARGET_VERSION" ]; then
     if RESOLVED_VERSION=$(resolve_latest_version) && [ -n "$RESOLVED_VERSION" ]; then
-        echo "📌 Актуальный релиз из манифеста: ${RESOLVED_VERSION}"
+        echo "📌 Актуальный релиз: ${RESOLVED_VERSION}"
     else
-        echo "⚠️ Не удалось прочитать releases/versions.json — используем плавающий :latest"
+        echo "⚠️ Не удалось прочитать version.json/releases/versions.json — используем плавающий :latest"
         RESOLVED_VERSION="latest"
     fi
 else
