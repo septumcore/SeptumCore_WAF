@@ -28,8 +28,14 @@ usage() {
   sudo bash install.sh --version alfa-0.7.60
   sudo bash install.sh --list
 
+Переменные окружения:
+  VERSION=...           Версия релиза (как --version)
+  REPLACE_COMPOSE=yes   Без спроса заменить docker-compose.yml
+
 Примечание: latest всегда резолвится в конкретный тег из releases/versions.json
 (не в плавающий Docker :latest — он часто отстаёт).
+Если локальный docker-compose.yml уже есть и отличается от релиза —
+скрипт спросит, заменять ли его (по умолчанию — нет).
 EOF
 }
 
@@ -253,9 +259,55 @@ update_self() {
     fi
 
     if [ -f "$COMPOSE_NAME.new" ]; then
-        # Для обновлений всегда ставим compose выбранного релиза
-        mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
-        echo "✅ Установлен docker-compose.yml для ${RESOLVED_VERSION}."
+        local replace_compose=0
+        if [ ! -f "$COMPOSE_NAME" ]; then
+            replace_compose=1
+        elif [ "${REPLACE_COMPOSE:-}" = "1" ] || [ "${REPLACE_COMPOSE:-}" = "yes" ] || [ "${FORCE_COMPOSE:-}" = "1" ]; then
+            replace_compose=1
+            echo "ℹ️ REPLACE_COMPOSE=yes — docker-compose.yml будет заменён."
+        elif cmp -s "$COMPOSE_NAME" "$COMPOSE_NAME.new" 2>/dev/null; then
+            echo "✅ docker-compose.yml уже актуален для ${RESOLVED_VERSION}."
+            rm -f "$COMPOSE_NAME.new"
+        else
+            echo ""
+            echo "⚠️ Найден локальный docker-compose.yml — он отличается от релиза ${RESOLVED_VERSION}."
+            echo "   Локальные правки (порты, volumes, env) будут потеряны при замене."
+            local answer=""
+            if [ -r /dev/tty ]; then
+                printf "❓ Заменить docker-compose.yml на версию из релиза? [y/N]: " > /dev/tty
+                IFS= read -r answer < /dev/tty || true
+            elif [ -t 0 ]; then
+                printf "❓ Заменить docker-compose.yml на версию из релиза? [y/N]: "
+                IFS= read -r answer || true
+            else
+                echo "ℹ️ Нет TTY — оставляем текущий docker-compose.yml без изменений."
+                echo "   Чтобы заменить: REPLACE_COMPOSE=yes sudo bash install.sh"
+                answer="n"
+            fi
+            if is_yes "$answer"; then
+                replace_compose=1
+            else
+                echo "⏭️ docker-compose.yml оставлен без изменений."
+                # Всё равно обновим теги образов в существующем compose, если там :latest
+                if [ "$RESOLVED_VERSION" != "latest" ] && grep -q ':latest' "$COMPOSE_NAME" 2>/dev/null; then
+                    echo "🔧 В текущем compose найдены теги :latest — закрепляем ${RESOLVED_VERSION}..."
+                    cp "$COMPOSE_NAME" "${COMPOSE_NAME}.bak.$(date +%Y%m%d%H%M%S)"
+                    sed -i.bak "s|:latest|:${RESOLVED_VERSION}|g" "$COMPOSE_NAME" 2>/dev/null \
+                      || sed -i '' "s|:latest|:${RESOLVED_VERSION}|g" "$COMPOSE_NAME"
+                    rm -f "${COMPOSE_NAME}.bak"
+                fi
+                rm -f "$COMPOSE_NAME.new"
+            fi
+        fi
+
+        if [ "$replace_compose" -eq 1 ] && [ -f "$COMPOSE_NAME.new" ]; then
+            if [ -f "$COMPOSE_NAME" ]; then
+                cp "$COMPOSE_NAME" "${COMPOSE_NAME}.bak.$(date +%Y%m%d%H%M%S)"
+                echo "💾 Бэкап текущего compose сохранён."
+            fi
+            mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
+            echo "✅ Установлен docker-compose.yml для ${RESOLVED_VERSION}."
+        fi
     fi
 
     curl_fetch "$REPO_URL/$SCRIPT_NAME" "$SCRIPT_NAME.new"
