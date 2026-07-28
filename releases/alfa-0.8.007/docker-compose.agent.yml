@@ -1,0 +1,121 @@
+# =============================================================================
+# SeptumCore WAF — Docker Compose для Worker-ноды (Агент)
+# =============================================================================
+# Этот файл автоматически генерируется Мастер-нодой и отправляется на Worker
+# при нажатии кнопки "Провизионинг" в панели управления.
+#
+# Вы можете использовать его и вручную:
+#   1. Скопируйте на Worker-сервер в /opt/septumcore-worker/
+#   2. Заполните переменные NODE_TOKEN и MASTER_URL
+#   3. Запустите: docker-compose -f docker-compose.agent.yml up -d
+# =============================================================================
+
+services:
+
+  # ─── WAF Engine (Nginx + ModSecurity) ────────────────────────────────────
+  waf-engine:
+    image: actek92/septumcore-waf:alfa-0.8.007
+    container_name: main-waf
+
+    environment:
+      - BACKEND=http://waf-backend:9001
+
+      # ModSecurity настройки
+      - MODSEC_AUDIT_ENGINE=RelevantOnly
+      - MODSEC_AUDIT_LOG=/var/log/nginx/audit.log
+      - MODSEC_AUDIT_LOG_FORMAT=JSON
+      - MODSEC_AUDIT_LOG_TYPE=Serial
+      - MODSEC_AUDIT_LOG_PARTS=ABIJDEFHZ
+
+    cap_add:
+      - NET_BIND_SERVICE
+
+    ports:
+      - "80:80"
+      - "443:443"
+
+    volumes:
+      # ACME challenge для Let's Encrypt
+      - ./acme-challenge:/var/www/acme
+
+      # Конфигурации Nginx (генерирует Agent-бэкенд после синхронизации)
+      - ./waf-nginx/conf.d:/etc/nginx/conf.d
+      - ./waf-nginx/certs:/etc/nginx/certs:ro
+
+      # Кастомные HTML-страницы (блокировка, under attack)
+      - ./waf-html:/app/waf-html:ro
+
+      # Логи
+      - ./waf-logs:/app/waf-logs
+      - ./waf-logs:/var/log/nginx
+
+      # Кэш Nginx
+      - ./waf-cache:/var/cache/waf_nginx
+
+      # Временные директории с правами на запись
+      - type: tmpfs
+        target: /var/cache/nginx
+        tmpfs:
+          mode: 01777
+      - type: tmpfs
+        target: /var/run
+        tmpfs:
+          mode: 01777
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sI http://127.0.0.1 > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    networks:
+      - waf_net
+    restart: always
+    depends_on:
+      - backend
+
+  # ─── Worker Agent (Бэкенд в режиме агента, без БД) ───────────────────────
+  backend:
+    image: actek92/septumcore-backend:alfa-0.8.007
+    container_name: waf-backend
+
+    entrypoint: ["sh", "-c", "umask 002 && exec /app/septumcore"]
+
+    ports:
+      - "9001:9001"
+
+    environment:
+      # ⚠️  ОБЯЗАТЕЛЬНО ЗАПОЛНИТЕ:
+      - NODE_TOKEN=${NODE_TOKEN}           # Токен из панели WAF → Ноды → Скопировать токен
+      - MASTER_URL=${MASTER_URL}           # URL мастер-ноды, например: https://192.168.1.10:9000
+
+      # Агент-режим: при наличии NODE_TOKEN БД не требуется
+      # SESSION_SECRET не нужен в агент-режиме
+
+    volumes:
+      # Доступ к Docker для управления Nginx-контейнером
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # Конфиги Nginx — агент записывает их после синхронизации с мастером
+      - ./waf-nginx:/app/waf-nginx
+
+      # Логи и сертификаты
+      - ./waf-logs:/app/waf-logs
+      - ./acme-challenge:/app/acme-challenge
+      - ./waf-html:/app/waf-html
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9001/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    restart: always
+    networks:
+      - waf_net
+
+networks:
+  waf_net:
+    driver: bridge

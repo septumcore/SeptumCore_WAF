@@ -12,6 +12,7 @@ DOCKER_MIRRORS_DEFAULT="https://mirror.gcr.io,https://docker.m.daocloud.io"
 # Можно задать: VERSION=alfa-0.7.60 sudo bash install.sh
 # Или:         sudo bash install.sh --version alfa-0.7.60
 TARGET_VERSION="${VERSION:-latest}"
+RESOLVED_VERSION=""
 
 usage() {
     cat <<EOF
@@ -26,7 +27,28 @@ usage() {
   curl -sSL ${REPO_URL}/install.sh | sudo VERSION=alfa-0.7.60 bash
   sudo bash install.sh --version alfa-0.7.60
   sudo bash install.sh --list
+
+Примечание: latest всегда резолвится в конкретный тег из releases/versions.json
+(не в плавающий Docker :latest — он часто отстаёт).
 EOF
+}
+
+resolve_latest_version() {
+    local manifest
+    manifest=$(mktemp)
+    if ! curl --fail --location --silent --show-error \
+        --connect-timeout 10 --max-time 30 \
+        "$REPO_URL/releases/versions.json" -o "$manifest"; then
+        rm -f "$manifest"
+        return 1
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("latest",""))' "$manifest"
+    else
+        # грубый fallback без python
+        grep -o '"latest"[[:space:]]*:[[:space:]]*"[^"]*"' "$manifest" | head -1 | cut -d'"' -f4
+    fi
+    rm -f "$manifest"
 }
 
 list_releases() {
@@ -158,7 +180,19 @@ fi
 
 echo "==================================================="
 echo "🛡️ SeptumCore WAF CE: Подготовка к установке..."
-echo "📌 Целевая версия: ${TARGET_VERSION}"
+echo "📌 Запрошено: ${TARGET_VERSION}"
+
+# latest → конкретный тег из манифеста (надёжнее плавающего Docker :latest)
+if [ "$TARGET_VERSION" = "latest" ] || [ -z "$TARGET_VERSION" ]; then
+    if RESOLVED_VERSION=$(resolve_latest_version) && [ -n "$RESOLVED_VERSION" ]; then
+        echo "📌 Актуальный релиз из манифеста: ${RESOLVED_VERSION}"
+    else
+        echo "⚠️ Не удалось прочитать releases/versions.json — используем плавающий :latest"
+        RESOLVED_VERSION="latest"
+    fi
+else
+    RESOLVED_VERSION="$TARGET_VERSION"
+fi
 echo "==================================================="
 
 # --- 0. ПРОВЕРКА И ПЕРЕХОД В РАБОЧУЮ ДИРЕКТОРИЮ ---
@@ -176,10 +210,10 @@ else
 fi
 
 compose_source_url() {
-    if [ "$TARGET_VERSION" = "latest" ] || [ -z "$TARGET_VERSION" ]; then
+    if [ "$RESOLVED_VERSION" = "latest" ]; then
         echo "$REPO_URL/$COMPOSE_NAME"
     else
-        echo "$REPO_URL/releases/${TARGET_VERSION}/$COMPOSE_NAME"
+        echo "$REPO_URL/releases/${RESOLVED_VERSION}/$COMPOSE_NAME"
     fi
 }
 
@@ -201,54 +235,37 @@ update_self() {
     echo "⬇️ Compose: $compose_url"
 
     if ! curl_fetch "$compose_url" "$COMPOSE_NAME.new"; then
-        echo "❌ Не удалось скачать compose для версии '${TARGET_VERSION}'."
-        echo "   Проверьте: sudo bash install.sh --list"
-        exit 1
-    fi
-    if [ -f "$COMPOSE_NAME.new" ]; then
-        if [ -f "$COMPOSE_NAME" ]; then
-            local do_overwrite="n"
-            # Явная версия / FORCE_COMPOSE=1 / неинтерактивный update → всегда обновляем compose
-            if [ "$TARGET_VERSION" != "latest" ] || [ "${FORCE_COMPOSE:-0}" = "1" ]; then
-                do_overwrite="y"
-            elif [ -t 0 ] && [ -r /dev/tty ]; then
-                echo -n "⚠️ Файл $COMPOSE_NAME уже существует. Перезаписать его? [y/N]: "
-                read -r ans < /dev/tty || true
-                if is_yes "$ans"; then
-                    do_overwrite="y"
-                fi
+        if [ "$RESOLVED_VERSION" != "latest" ]; then
+            echo "⚠️ Нет releases/${RESOLVED_VERSION}/compose — пробуем корневой и закрепляем тег..."
+            if curl_fetch "$REPO_URL/$COMPOSE_NAME" "$COMPOSE_NAME.new"; then
+                # На случай если в корне :latest — пиним на релизный тег
+                sed -i.bak "s|:latest|:${RESOLVED_VERSION}|g" "$COMPOSE_NAME.new" 2>/dev/null \
+                  || sed -i '' "s|:latest|:${RESOLVED_VERSION}|g" "$COMPOSE_NAME.new"
+                rm -f "$COMPOSE_NAME.new.bak"
             else
-                # curl | bash — без TTY: обновляем compose по умолчанию (иначе «обновление» бесполезно)
-                echo "ℹ️ Неинтерактивный режим: обновляем $COMPOSE_NAME автоматически."
-                do_overwrite="y"
-            fi
-
-            if [ "$do_overwrite" = "y" ]; then
-                mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
-                echo "✅ Файл конфигурации $COMPOSE_NAME обновлен."
-            else
-                rm -f "$COMPOSE_NAME.new"
-                echo "⏭️ Оставлен текущий файл $COMPOSE_NAME."
+                echo "❌ Не удалось скачать compose."
+                exit 1
             fi
         else
-            mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
-            echo "✅ Файл конфигурации $COMPOSE_NAME скачан."
+            echo "❌ Не удалось скачать compose."
+            exit 1
         fi
+    fi
+
+    if [ -f "$COMPOSE_NAME.new" ]; then
+        # Для обновлений всегда ставим compose выбранного релиза
+        mv "$COMPOSE_NAME.new" "$COMPOSE_NAME"
+        echo "✅ Установлен docker-compose.yml для ${RESOLVED_VERSION}."
     fi
 
     curl_fetch "$REPO_URL/$SCRIPT_NAME" "$SCRIPT_NAME.new"
     if [ -f "$SCRIPT_NAME.new" ]; then
-        if [ -f "$SCRIPT_NAME" ] && ! cmp -s "$SCRIPT_NAME" "$SCRIPT_NAME.new"; then
-            mv "$SCRIPT_NAME.new" "$SCRIPT_NAME"
-            chmod 700 "$SCRIPT_NAME"
-            echo "✅ Скрипт установки обновлен локально."
-        else
-            mv "$SCRIPT_NAME.new" "$SCRIPT_NAME"
-            chmod 700 "$SCRIPT_NAME"
-        fi
+        mv "$SCRIPT_NAME.new" "$SCRIPT_NAME"
+        chmod 700 "$SCRIPT_NAME"
+        echo "✅ Скрипт установки обновлен локально."
     fi
 
-    echo "$TARGET_VERSION" > .installed_version
+    echo "$RESOLVED_VERSION" > .installed_version
 }
 
 update_self
@@ -323,18 +340,21 @@ find waf-logs -type f -exec chmod 660 {} +
 chmod 666 /var/run/docker.sock
 
 # --- 5. ОБНОВЛЕНИЕ ОБРАЗОВ И ЗАПУСК ---
-echo "🚀 Подтягиваем образы (версия: ${TARGET_VERSION})..."
+echo "🚀 Подтягиваем образы (релиз: ${RESOLVED_VERSION})..."
 retry 3 $COMPOSE_CMD pull
 echo "🔄 Пересоздаём контейнеры, чтобы подхватить новые образы..."
 retry 3 $COMPOSE_CMD up -d --remove-orphans --force-recreate
 
+# Даём backend пару секунд на старт перед -v
+sleep 3
+
 echo ""
 echo "✅ УСТАНОВКА/ОБНОВЛЕНИЕ ЗАВЕРШЕНО!"
 echo "📂 Все файлы системы находятся в: $INSTALL_DIR"
-echo "📌 Установленная версия: ${TARGET_VERSION}"
+echo "📌 Установленный релиз: ${RESOLVED_VERSION}"
 if command -v docker >/dev/null 2>&1; then
     echo "🔎 Версия внутри backend-контейнера:"
-    docker exec waf-backend /app/septumcore -v 2>/dev/null || docker exec waf-backend sh -c '/app/septumcore -v' 2>/dev/null || echo "   (не удалось прочитать — контейнер ещё стартует)"
+    docker exec waf-backend /app/septumcore -v 2>/dev/null || echo "   (контейнер ещё стартует — проверьте: curl -sk https://127.0.0.1:9000/api/version)"
 fi
 IP=$(hostname -I | awk '{print $1}')
 echo "🌐 Панель управления: https://$IP:9000"
