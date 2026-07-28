@@ -31,12 +31,32 @@ usage() {
 Переменные окружения:
   VERSION=...           Версия релиза (как --version)
   REPLACE_COMPOSE=yes   Без спроса заменить docker-compose.yml
+  SEPTUMCORE_VERSION    Тег образов в docker-compose/.env (если не задан — compose использует latest)
 
 Примечание: latest всегда резолвится в конкретный тег из releases/versions.json
 (не в плавающий Docker :latest — он часто отстаёт).
 Если локальный docker-compose.yml уже есть и отличается от релиза —
 скрипт спросит, заменять ли его (по умолчанию — нет).
 EOF
+}
+
+set_env_var() {
+    local key="$1"
+    local value="$2"
+    local file="${3:-.env}"
+
+    if [ ! -f "$file" ]; then
+        printf '%s=%s\n' "$key" "$value" > "$file"
+        return 0
+    fi
+
+    if grep -q "^${key}=" "$file" 2>/dev/null; then
+        sed -i.bak "s|^${key}=.*$|${key}=${value}|g" "$file" 2>/dev/null \
+          || sed -i '' "s|^${key}=.*$|${key}=${value}|g" "$file"
+        rm -f "${file}.bak" 2>/dev/null || true
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$file"
+    fi
 }
 
 resolve_latest_version() {
@@ -361,9 +381,16 @@ if [ ! -f .env ]; then
     echo "POSTGRES_USER=septumcore" >> .env
     echo "POSTGRES_PASSWORD=$DB_PASS" >> .env
     echo "POSTGRES_DB=septumcore_db" >> .env
+    echo "SEPTUMCORE_VERSION=latest" >> .env
     echo "✅ Файл .env успешно создан."
 else
     echo "✅ Файл .env найден. Пароли и настройки сохранены."
+fi
+
+# Одна точка правды для версии образов: .env -> SEPTUMCORE_VERSION
+if [ -n "$RESOLVED_VERSION" ]; then
+    set_env_var "SEPTUMCORE_VERSION" "$RESOLVED_VERSION" ".env"
+    echo "✅ Версия образов записана в .env: SEPTUMCORE_VERSION=${RESOLVED_VERSION}"
 fi
 
 # --- 4. ПРАВА ДОСТУПА И СТРУКТУРА (Блок СЗИ) ---
