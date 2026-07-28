@@ -37,8 +37,9 @@ usage() {
   REPLACE_COMPOSE=yes   Без спроса заменить docker-compose.yml
   SEPTUMCORE_VERSION    Тег образов в docker-compose/.env (если не задан — compose использует latest)
 
-Примечание: latest всегда резолвится в конкретный тег из version.json
-(если version.json недоступен — используем releases/versions.json; Docker :latest не используется как источник правды).
+Примечание: latest всегда резолвится ТОЛЬКО из version.json в выбранном REPO_URL.
+releases/versions.json — история релизов для --list и установки конкретной версии.
+Docker :latest не используется как источник правды.
 Если локальный docker-compose.yml уже есть и отличается от релиза —
 скрипт спросит, заменять ли его (по умолчанию — нет).
 EOF
@@ -64,46 +65,80 @@ set_env_var() {
 }
 
 resolve_latest_version() {
-    local meta
+    local meta resolved manifest_latest=""
     meta=$(mktemp)
     if ! curl --fail --location --silent --show-error \
         --connect-timeout 10 --max-time 30 \
         "$VERSION_INFO_URL" -o "$meta"; then
         rm -f "$meta"
-        meta=$(mktemp)
-        if ! curl --fail --location --silent --show-error \
-            --connect-timeout 10 --max-time 30 \
-            "$RELEASES_MANIFEST_URL" -o "$meta"; then
-            rm -f "$meta"
-            return 1
-        fi
-        if command -v python3 >/dev/null 2>&1; then
-            python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("latest",""))' "$meta"
-        else
-            grep -o '"latest"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta" | head -1 | cut -d'"' -f4
-        fi
+        echo "❌ Не удалось загрузить version.json: $VERSION_INFO_URL" >&2
+        return 1
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        resolved=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version",""))' "$meta")
     else
-        if command -v python3 >/dev/null 2>&1; then
-            python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version",""))' "$meta"
-        else
-            grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta" | head -1 | cut -d'"' -f4
-        fi
+        resolved=$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta" | head -1 | cut -d'"' -f4)
     fi
     rm -f "$meta"
-}
 
-list_releases() {
+    if [ -z "$resolved" ]; then
+        echo "❌ В version.json не найдено поле version" >&2
+        return 1
+    fi
+
     local manifest
     manifest=$(mktemp)
     if curl --fail --location --silent --show-error \
         --connect-timeout 10 --max-time 30 \
+        "$RELEASES_MANIFEST_URL" -o "$manifest" 2>/dev/null; then
+        if command -v python3 >/dev/null 2>&1; then
+            manifest_latest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("latest",""))' "$manifest" 2>/dev/null || true)
+        else
+            manifest_latest=$(grep -o '"latest"[[:space:]]*:[[:space:]]*"[^"]*"' "$manifest" | head -1 | cut -d'"' -f4)
+        fi
+        if [ -n "$manifest_latest" ] && [ "$manifest_latest" != "$resolved" ]; then
+            echo "⚠️ releases/versions.json указывает latest=${manifest_latest}, но используем version.json=${resolved}" >&2
+        fi
+    fi
+    rm -f "$manifest"
+
+    printf '%s' "$resolved"
+}
+
+list_releases() {
+    local version_meta manifest
+    version_meta=$(mktemp)
+    if ! curl --fail --location --silent --show-error \
+        --connect-timeout 10 --max-time 30 \
+        "$VERSION_INFO_URL" -o "$version_meta"; then
+        rm -f "$version_meta"
+        echo "❌ Не удалось загрузить version.json: $VERSION_INFO_URL"
+        exit 1
+    fi
+
+    echo "📦 Текущий релиз (version.json):"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$version_meta" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+print(f"  latest → {data.get('version', '?')}  ({data.get('build_date', '-')})")
+PY
+    else
+        cat "$version_meta"
+    fi
+    rm -f "$version_meta"
+
+    manifest=$(mktemp)
+    if curl --fail --location --silent --show-error \
+        --connect-timeout 10 --max-time 30 \
         "$RELEASES_MANIFEST_URL" -o "$manifest"; then
-        echo "📦 Доступные релизы (последние 5):"
+        echo ""
+        echo "📜 История релизов (последние 5):"
         if command -v python3 >/dev/null 2>&1; then
             python3 - "$manifest" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
-print(f"  latest → {data.get('latest', '?')}")
 for r in data.get("releases", []):
     mark = " *" if r.get("version") == data.get("latest") else "  "
     print(f"{mark}{r.get('version')}  ({r.get('date', '-')})")
@@ -113,26 +148,8 @@ PY
             cat "$manifest"
         fi
     else
-        rm -f "$manifest"
-        manifest=$(mktemp)
-        if ! curl --fail --location --silent --show-error \
-            --connect-timeout 10 --max-time 30 \
-            "$VERSION_INFO_URL" -o "$manifest"; then
-            rm -f "$manifest"
-            echo "❌ Не удалось загрузить ни $RELEASES_MANIFEST_URL, ни $VERSION_INFO_URL"
-            exit 1
-        fi
-        echo "📦 Доступный текущий релиз:"
-        if command -v python3 >/dev/null 2>&1; then
-            python3 - "$manifest" <<'PY'
-import json, sys
-data = json.load(open(sys.argv[1]))
-print(f"  latest → {data.get('version', '?')}  ({data.get('build_date', '-')})")
-print("\nИстория релизов недоступна: releases/versions.json не найден.")
-PY
-        else
-            cat "$manifest"
-        fi
+        echo ""
+        echo "ℹ️ История releases/versions.json недоступна."
     fi
     rm -f "$manifest"
 }
@@ -241,12 +258,13 @@ echo "==================================================="
 echo "🛡️ SeptumCore WAF CE: Подготовка к установке..."
 echo "📌 Запрошено: ${TARGET_VERSION}"
 
-# latest → конкретный тег из version.json (или fallback в releases/versions.json)
+# latest → конкретный тег только из version.json
 if [ "$TARGET_VERSION" = "latest" ] || [ -z "$TARGET_VERSION" ]; then
     if RESOLVED_VERSION=$(resolve_latest_version) && [ -n "$RESOLVED_VERSION" ]; then
-        echo "📌 Актуальный релиз: ${RESOLVED_VERSION}"
+        echo "📌 Актуальный релиз (version.json): ${RESOLVED_VERSION}"
+        echo "   ${VERSION_INFO_URL}"
     else
-        echo "⚠️ Не удалось прочитать version.json/releases/versions.json — используем плавающий :latest"
+        echo "⚠️ Не удалось прочитать version.json — используем плавающий :latest"
         RESOLVED_VERSION="latest"
     fi
 else
