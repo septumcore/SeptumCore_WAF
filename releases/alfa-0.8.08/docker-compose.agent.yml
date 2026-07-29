@@ -14,7 +14,7 @@ services:
 
   # ─── WAF Engine (Nginx + ModSecurity) ────────────────────────────────────
   waf-engine:
-    image: actek92/septumcore-waf:alfa-0.8.010
+    image: actek92/septumcore-waf:${SEPTUMCORE_VERSION:-latest}
     container_name: main-waf
 
     environment:
@@ -77,7 +77,7 @@ services:
 
   # ─── Worker Agent (Бэкенд в режиме агента, без БД) ───────────────────────
   backend:
-    image: actek92/septumcore-backend:alfa-0.8.010
+    image: actek92/septumcore-backend:${SEPTUMCORE_VERSION:-latest}
     container_name: waf-backend
 
     entrypoint: ["sh", "-c", "umask 002 && exec /app/septumcore"]

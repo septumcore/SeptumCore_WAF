@@ -1,6 +1,6 @@
 services:
   waf-engine:
-    image: actek92/septumcore-waf:alfa-0.8.010
+    image: actek92/septumcore-waf:${SEPTUMCORE_VERSION:-latest}
     container_name: main-waf
 
     environment:
@@ -30,6 +30,7 @@ services:
 
     volumes:
       - ./acme-challenge:/var/www/acme
+      - ./waf-nginx:/app/waf-nginx
 
       # Проброс путей, чтобы Nginx видел абсолютные пути от бэкенда
       - ./waf-nginx/conf.d:/etc/nginx/conf.d
@@ -61,7 +62,7 @@ services:
       - backend
 
   backend:
-    image: actek92/septumcore-backend:alfa-0.8.010
+    image: actek92/septumcore-backend:${SEPTUMCORE_VERSION:-latest}
     container_name: waf-backend
 
     # ⚠️ Бинарник называется septumcore (см. Dockerfile.backend)
