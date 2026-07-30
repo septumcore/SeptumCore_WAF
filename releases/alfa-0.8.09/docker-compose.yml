@@ -30,6 +30,7 @@ services:
 
     volumes:
       - ./acme-challenge:/var/www/acme
+      - ./waf-nginx:/app/waf-nginx
 
       # Проброс путей, чтобы Nginx видел абсолютные пути от бэкенда
       - ./waf-nginx/conf.d:/etc/nginx/conf.d

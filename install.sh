@@ -64,6 +64,40 @@ set_env_var() {
     fi
 }
 
+# Меняет теги ТОЛЬКО у septumcore-waf / septumcore-backend.
+# Чужие образы (zerotier, netbird, postgres, ...) не трогаем —
+# иначе :latest у них превращается в alfa-0.8.xx и pull падает.
+sync_septumcore_compose_tags() {
+    local file="$1"
+    local version="$2"
+
+    [ -r "$file" ] || return 0
+    [ -n "$version" ] && [ "$version" != "latest" ] || return 0
+
+    # Compose уже на ${SEPTUMCORE_VERSION} — достаточно записи в .env
+    if grep -qE 'septumcore-(waf|backend):\$\{SEPTUMCORE_VERSION' "$file" 2>/dev/null; then
+        echo "ℹ️ Compose использует \${SEPTUMCORE_VERSION} — сторонние образы не меняем."
+        return 0
+    fi
+
+    if ! grep -qE 'septumcore-(waf|backend):(alfa-|latest)' "$file" 2>/dev/null; then
+        echo "ℹ️ В compose нет жёстких тегов septumcore-waf/backend для синхронизации."
+        return 0
+    fi
+
+    echo "🔧 Синхронизируем теги septumcore-waf/backend → ${version} (остальные образы не трогаем)..."
+    cp "$file" "${file}.bak.$(date +%Y%m%d%H%M%S)"
+    sed -i.bak -E \
+        -e "s|(septumcore-waf:)(alfa-[^\"[:space:]]+|latest)|\\1${version}|g" \
+        -e "s|(septumcore-backend:)(alfa-[^\"[:space:]]+|latest)|\\1${version}|g" \
+        "$file" 2>/dev/null \
+      || sed -i '' -E \
+        -e "s|(septumcore-waf:)(alfa-[^\"[:space:]]+|latest)|\\1${version}|g" \
+        -e "s|(septumcore-backend:)(alfa-[^\"[:space:]]+|latest)|\\1${version}|g" \
+        "$file"
+    rm -f "${file}.bak" 2>/dev/null || true
+}
+
 resolve_latest_version() {
     local meta resolved manifest_latest=""
     meta=$(mktemp)
@@ -315,10 +349,8 @@ update_self() {
         if [ "$RESOLVED_VERSION" != "latest" ]; then
             echo "⚠️ Нет releases/${RESOLVED_VERSION}/compose — пробуем корневой и закрепляем тег..."
             if curl_fetch "$REPO_URL/$COMPOSE_NAME" "$COMPOSE_NAME.new"; then
-                # На случай если в корне :latest — пиним на релизный тег
-                sed -i.bak "s|:latest|:${RESOLVED_VERSION}|g" "$COMPOSE_NAME.new" 2>/dev/null \
-                  || sed -i '' "s|:latest|:${RESOLVED_VERSION}|g" "$COMPOSE_NAME.new"
-                rm -f "$COMPOSE_NAME.new.bak"
+                # На случай если в корне жёсткие :latest у septumcore — пиним только их
+                sync_septumcore_compose_tags "$COMPOSE_NAME.new" "$RESOLVED_VERSION"
             else
                 echo "❌ Не удалось скачать compose."
                 exit 1
@@ -359,26 +391,11 @@ update_self() {
                 replace_compose=1
             else
                 echo "⏭️ docker-compose.yml оставлен без изменений."
-                # Всё равно синхронизируем теги образов в существующем compose,
-                # чтобы не получить "релиз alfa-0.8.008, а backend всё ещё 0.8.007".
+                # Всё равно синхронизируем теги ТОЛЬКО septumcore-образов,
+                # чтобы не получить "релиз alfa-0.8.08, а backend всё ещё 0.8.007".
+                # Чужие сервисы (zerotier, netbird, ...) не трогаем.
                 if [ "$RESOLVED_VERSION" != "latest" ] && [ -r "$COMPOSE_NAME" ]; then
-                    if grep -qE 'septumcore-(waf|backend):alfa-' "$COMPOSE_NAME" 2>/dev/null; then
-                        echo "🔧 В текущем compose найдены зафиксированные теги alfa-* — синхронизируем на ${RESOLVED_VERSION}..."
-                        cp "$COMPOSE_NAME" "${COMPOSE_NAME}.bak.$(date +%Y%m%d%H%M%S)"
-                        sed -i.bak -E "s|(septumcore-waf:)(alfa-[^\"[:space:]]+)|\\1${RESOLVED_VERSION}|g" "$COMPOSE_NAME" 2>/dev/null \
-                          || sed -i '' -E "s|(septumcore-waf:)(alfa-[^\"[:space:]]+)|\\1${RESOLVED_VERSION}|g" "$COMPOSE_NAME"
-                        sed -i.bak -E "s|(septumcore-backend:)(alfa-[^\"[:space:]]+)|\\1${RESOLVED_VERSION}|g" "$COMPOSE_NAME" 2>/dev/null \
-                          || sed -i '' -E "s|(septumcore-backend:)(alfa-[^\"[:space:]]+)|\\1${RESOLVED_VERSION}|g" "$COMPOSE_NAME"
-                        rm -f "$COMPOSE_NAME.bak" 2>/dev/null || true
-                    elif grep -q ':latest' "$COMPOSE_NAME" 2>/dev/null; then
-                        echo "🔧 В текущем compose найдены теги :latest — закрепляем ${RESOLVED_VERSION}..."
-                        cp "$COMPOSE_NAME" "${COMPOSE_NAME}.bak.$(date +%Y%m%d%H%M%S)"
-                        sed -i.bak "s|:latest|:${RESOLVED_VERSION}|g" "$COMPOSE_NAME" 2>/dev/null \
-                          || sed -i '' "s|:latest|:${RESOLVED_VERSION}|g" "$COMPOSE_NAME"
-                        rm -f "${COMPOSE_NAME}.bak" 2>/dev/null || true
-                    else
-                        echo "ℹ️ В текущем compose не найдено :latest или alfa-* теги septumcore-waf/backend — пропускаем синхронизацию тегов."
-                    fi
+                    sync_septumcore_compose_tags "$COMPOSE_NAME" "$RESOLVED_VERSION"
                 fi
                 rm -f "$COMPOSE_NAME.new"
             fi
@@ -483,8 +500,17 @@ find waf-logs -type f -exec chmod 660 {} +
 chmod 666 /var/run/docker.sock
 
 # --- 5. ОБНОВЛЕНИЕ ОБРАЗОВ И ЗАПУСК ---
-echo "🚀 Подтягиваем образы (релиз: ${RESOLVED_VERSION})..."
-retry 3 $COMPOSE_CMD pull
+echo "🚀 Подтягиваем образы SeptumCore (релиз: ${RESOLVED_VERSION})..."
+retry 3 $COMPOSE_CMD pull waf-engine backend postgres
+
+# Дополнительные сервисы из локального compose (zerotier, netbird, ...) —
+# тянем отдельно, ошибка по ним не должна ронять обновление WAF.
+EXTRA_SERVICES=$($COMPOSE_CMD config --services 2>/dev/null | grep -vE '^(waf-engine|backend|postgres)$' | tr '\n' ' ' || true)
+if [ -n "${EXTRA_SERVICES// }" ]; then
+    echo "🚀 Подтягиваем дополнительные сервисы: ${EXTRA_SERVICES}"
+    $COMPOSE_CMD pull $EXTRA_SERVICES || echo "⚠️ Не все дополнительные образы удалось скачать — обновление WAF продолжается."
+fi
+
 echo "🔄 Пересоздаём контейнеры, чтобы подхватить новые образы..."
 retry 3 $COMPOSE_CMD up -d --remove-orphans --force-recreate
 
